@@ -1,0 +1,5 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - name: scan secrets
+      run: gitleaks git --staged
