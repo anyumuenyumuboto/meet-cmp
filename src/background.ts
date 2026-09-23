@@ -13,8 +13,6 @@ interface StorageData {
 
 let isActive = false
 let apiKey: string | undefined
-let recognition: any = null
-let isListening = false
 
 // Load initial state
 chrome.storage.sync.get(["isActive", "apiKey"], (result: StorageData) => {
@@ -27,73 +25,34 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
   if (namespace === "sync") {
     if (changes.isActive) {
       isActive = changes.isActive.newValue
-      if (isActive) {
-        startListening()
-      } else {
-        stopListening()
-      }
+      // Notify content scripts about the change
+      chrome.tabs.query({}, (tabs) => {
+        tabs.forEach((tab) => {
+          if (tab.id) {
+            chrome.tabs.sendMessage(tab.id, {
+              type: "TOGGLE_ACTIVE",
+              isActive: changes.isActive.newValue
+            }).catch(() => {}) // Ignore errors for tabs that don't have content script
+          }
+        })
+      })
     }
     if (changes.apiKey) {
       apiKey = changes.apiKey.newValue
-    }
-  }
-})
-
-// Start speech recognition
-function startListening() {
-  if (isListening || !isActive) return
-
-  // Check if Web Speech API is available
-  if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
-    console.warn("Web Speech API not supported")
-    return
-  }
-
-  const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-  recognition = new SpeechRecognition()
-  
-  recognition.continuous = true
-  recognition.interimResults = true
-  recognition.lang = "en-US"
-
-  recognition.onresult = async (event: any) => {
-    const transcript = Array.from(event.results)
-      .map((result: any) => result[0].transcript)
-      .join("")
-
-    // Send transcript to content script for display
-    if (transcript.trim()) {
-      const predictions = await getPredictions(transcript)
-      
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs[0]?.id) {
-          chrome.tabs.sendMessage(tabs[0].id, {
-            type: "UPDATE_PREDICTIONS",
-            transcript,
-            predictions
-          })
-        }
+      // Notify content scripts about API key change
+      chrome.tabs.query({}, (tabs) => {
+        tabs.forEach((tab) => {
+          if (tab.id) {
+            chrome.tabs.sendMessage(tab.id, {
+              type: "UPDATE_API_KEY",
+              apiKey: changes.apiKey.newValue
+            }).catch(() => {})
+          }
+        })
       })
     }
   }
-
-  recognition.onerror = (event: any) => {
-    console.error("Speech recognition error:", event.error)
-  }
-
-  recognition.start()
-  isListening = true
-  console.log("Voice prediction started")
-}
-
-// Stop speech recognition
-function stopListening() {
-  if (recognition && isListening) {
-    recognition.stop()
-    isListening = false
-    console.log("Voice prediction stopped")
-  }
-}
+})
 
 // Get word predictions using AI or simple algorithm
 async function getPredictions(transcript: string): Promise<string[]> {
@@ -163,22 +122,21 @@ function getSimplePredictions(transcript: string): string[] {
   return ["the", "a", "is", "to", "of"]
 }
 
-// Start listening if already active on service worker startup
-if (isActive) {
-  startListening()
-}
-
-// Handle messages from popup
+// Handle messages from popup and content scripts
 chrome.runtime.onMessage.addListener((message: PlasmoBackgroundMessage, sender, sendResponse) => {
   if (message.type === "TOGGLE_ACTIVE") {
     isActive = message.isActive
-    if (isActive) {
-      startListening()
-    } else {
-      stopListening()
-    }
+    chrome.storage.sync.set({ isActive })
+    sendResponse({ success: true })
+  } else if (message.type === "GET_STATE") {
+    sendResponse({ isActive, apiKey })
+  } else if (message.type === "GET_PREDICTIONS") {
+    // Content script requests predictions from background
+    getPredictions(message.transcript!).then((predictions) => {
+      sendResponse({ predictions })
+    })
+    return true // Keep message channel open for async response
   }
-  sendResponse({ success: true })
 })
 
 export {}
