@@ -1,36 +1,52 @@
+```
+# Compiled and build artifacts
+*.pyc
+__pycache__/
+*.o
+*.obj
+dist/
+build/
+target/
 
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# Dependencies
+node_modules/
+venv/
+.venv/
+.env
+.env.local
+.env.*
 
-# dependencies
-/node_modules
-/.pnp
-.pnp.js
+# Logs and temp files
+*.log
+*.tmp
+*.swp
 
-# testing
-/coverage
+# Editors
+.vscode/
+.idea/
 
-# misc
-.DS_Store
-*.pem
+# Coverage
+coverage/
+htmlcov/
+.coverage
 
-# debug
+# Python specific
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+*.so
+.coverage
+.pytest_cache/
+.mypy_cache/
+
+# Node specific
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-.pnpm-debug.log*
 
-# local env files
-.env*.local
-
-out/
-build/
-dist/
-
-# plasmo
-.plasmo
-
-# typescript
-.tsbuildinfo
-
-# direnv
-.direnv/
+# OS generated files
+.DS_Store
+Thumbs.db
+```
