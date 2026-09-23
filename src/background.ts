@@ -13,86 +13,85 @@ interface StorageData {
 
 let isActive = false
 let apiKey: string | undefined
-let recognition: any = null
-let isListening = false
+let isInitialized = false
 
-// Load initial state
-chrome.storage.sync.get(["isActive", "apiKey"], (result: StorageData) => {
+// Safe storage access: never throw synchronously if chrome APIs are unavailable
+function safeGetStorage(): Promise<StorageData> {
+  return new Promise((resolve) => {
+    try {
+      if (typeof chrome === "undefined" || !chrome.storage?.sync?.get) {
+        console.warn("[background] chrome.storage not available")
+        resolve({ isActive: false } as StorageData)
+        return
+      }
+      chrome.storage.sync.get(["isActive", "apiKey"], (result: StorageData) => {
+        if (chrome.runtime.lastError) {
+          console.warn("[background] storage get error:", chrome.runtime.lastError.message)
+          resolve({ isActive: false } as StorageData)
+          return
+        }
+        resolve(result || ({ isActive: false } as StorageData))
+      })
+    } catch (e) {
+      console.error("[background] safeGetStorage threw:", e)
+      resolve({ isActive: false } as StorageData)
+    }
+  })
+}
+
+// Initialize state and start listening for messages
+async function initialize() {
+  const result = await safeGetStorage()
   isActive = result.isActive || false
   apiKey = result.apiKey
-})
+  isInitialized = true
+  console.log("[background] initialized. isActive=", isActive, "hasApiKey=", !!apiKey)
+}
 
-// Listen for storage changes
-chrome.storage.onChanged.addListener((changes, namespace) => {
-  if (namespace === "sync") {
+// Set up message listener IMMEDIATELY (synchronously at top level).
+// MV3 requires listeners to be registered before the first await,
+// otherwise events fired during async init are lost.
+setupMessageListener()
+
+// Then hydrate state from storage in the background.
+initialize().catch((e) => console.error("[background] init failed:", e))
+
+// Listen for storage changes (guarded so a missing API can never crash SW registration)
+try {
+  chrome.storage.onChanged.addListener((changes, namespace) => {
+    if (namespace === "sync") {
     if (changes.isActive) {
       isActive = changes.isActive.newValue
-      if (isActive) {
-        startListening()
-      } else {
-        stopListening()
-      }
+      // Notify content scripts about the change
+      chrome.tabs.query({}, (tabs) => {
+        tabs.forEach((tab) => {
+          if (tab.id) {
+            chrome.tabs.sendMessage(tab.id, {
+              type: "TOGGLE_ACTIVE",
+              isActive: changes.isActive.newValue
+            }).catch(() => {}) // Ignore errors for tabs that don't have content script
+          }
+        })
+      })
     }
     if (changes.apiKey) {
       apiKey = changes.apiKey.newValue
-    }
-  }
-})
-
-// Start speech recognition
-function startListening() {
-  if (isListening || !isActive) return
-
-  // Check if Web Speech API is available
-  if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
-    console.warn("Web Speech API not supported")
-    return
-  }
-
-  const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-  recognition = new SpeechRecognition()
-  
-  recognition.continuous = true
-  recognition.interimResults = true
-  recognition.lang = "en-US"
-
-  recognition.onresult = async (event: any) => {
-    const transcript = Array.from(event.results)
-      .map((result: any) => result[0].transcript)
-      .join("")
-
-    // Send transcript to content script for display
-    if (transcript.trim()) {
-      const predictions = await getPredictions(transcript)
-      
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs[0]?.id) {
-          chrome.tabs.sendMessage(tabs[0].id, {
-            type: "UPDATE_PREDICTIONS",
-            transcript,
-            predictions
-          })
-        }
+      // Notify content scripts about API key change
+      chrome.tabs.query({}, (tabs) => {
+        tabs.forEach((tab) => {
+          if (tab.id) {
+            chrome.tabs.sendMessage(tab.id, {
+              type: "UPDATE_API_KEY",
+              apiKey: changes.apiKey.newValue
+            }).catch(() => {})
+          }
+        })
       })
     }
-  }
-
-  recognition.onerror = (event: any) => {
-    console.error("Speech recognition error:", event.error)
-  }
-
-  recognition.start()
-  isListening = true
-  console.log("Voice prediction started")
-}
-
-// Stop speech recognition
-function stopListening() {
-  if (recognition && isListening) {
-    recognition.stop()
-    isListening = false
-    console.log("Voice prediction stopped")
-  }
+    }
+  })
+} catch (e) {
+  console.error("[background] failed to register storage.onChanged listener:", e)
 }
 
 // Get word predictions using AI or simple algorithm
@@ -163,22 +162,33 @@ function getSimplePredictions(transcript: string): string[] {
   return ["the", "a", "is", "to", "of"]
 }
 
-// Start listening if already active on service worker startup
-if (isActive) {
-  startListening()
+// Handle messages from popup and content scripts
+function setupMessageListener() {
+  chrome.runtime.onMessage.addListener((message: PlasmoBackgroundMessage, sender, sendResponse) => {
+    if (message.type === "TOGGLE_ACTIVE") {
+      isActive = message.isActive
+      chrome.storage.sync.set({ isActive })
+      sendResponse({ success: true })
+    } else if (message.type === "GET_STATE") {
+      sendResponse({ isActive, apiKey })
+    } else if (message.type === "GET_PREDICTIONS") {
+      // Content script requests predictions from background
+      getPredictions(message.transcript!).then((predictions) => {
+        sendResponse({ predictions })
+      })
+      return true // Keep message channel open for async response
+    }
+  })
 }
 
-// Handle messages from popup
-chrome.runtime.onMessage.addListener((message: PlasmoBackgroundMessage, sender, sendResponse) => {
-  if (message.type === "TOGGLE_ACTIVE") {
-    isActive = message.isActive
-    if (isActive) {
-      startListening()
-    } else {
-      stopListening()
-    }
-  }
-  sendResponse({ success: true })
-})
-
 export {}
+
+// Re-run init when the extension is installed/updated so state is fresh
+try {
+  chrome.runtime.onInstalled.addListener(() => {
+    console.log("[background] onInstalled fired, re-initializing")
+    initialize()
+  })
+} catch (e) {
+  console.error("[background] failed to register onInstalled listener:", e)
+}
