@@ -13,16 +13,53 @@ interface StorageData {
 
 let isActive = false
 let apiKey: string | undefined
+let isInitialized = false
 
-// Load initial state
-chrome.storage.sync.get(["isActive", "apiKey"], (result: StorageData) => {
+// Safe storage access: never throw synchronously if chrome APIs are unavailable
+function safeGetStorage(): Promise<StorageData> {
+  return new Promise((resolve) => {
+    try {
+      if (typeof chrome === "undefined" || !chrome.storage?.sync?.get) {
+        console.warn("[background] chrome.storage not available")
+        resolve({ isActive: false } as StorageData)
+        return
+      }
+      chrome.storage.sync.get(["isActive", "apiKey"], (result: StorageData) => {
+        if (chrome.runtime.lastError) {
+          console.warn("[background] storage get error:", chrome.runtime.lastError.message)
+          resolve({ isActive: false } as StorageData)
+          return
+        }
+        resolve(result || ({ isActive: false } as StorageData))
+      })
+    } catch (e) {
+      console.error("[background] safeGetStorage threw:", e)
+      resolve({ isActive: false } as StorageData)
+    }
+  })
+}
+
+// Initialize state and start listening for messages
+async function initialize() {
+  const result = await safeGetStorage()
   isActive = result.isActive || false
   apiKey = result.apiKey
-})
+  isInitialized = true
+  console.log("[background] initialized. isActive=", isActive, "hasApiKey=", !!apiKey)
+}
 
-// Listen for storage changes
-chrome.storage.onChanged.addListener((changes, namespace) => {
-  if (namespace === "sync") {
+// Set up message listener IMMEDIATELY (synchronously at top level).
+// MV3 requires listeners to be registered before the first await,
+// otherwise events fired during async init are lost.
+setupMessageListener()
+
+// Then hydrate state from storage in the background.
+initialize().catch((e) => console.error("[background] init failed:", e))
+
+// Listen for storage changes (guarded so a missing API can never crash SW registration)
+try {
+  chrome.storage.onChanged.addListener((changes, namespace) => {
+    if (namespace === "sync") {
     if (changes.isActive) {
       isActive = changes.isActive.newValue
       // Notify content scripts about the change
@@ -51,8 +88,11 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
         })
       })
     }
-  }
-})
+    }
+  })
+} catch (e) {
+  console.error("[background] failed to register storage.onChanged listener:", e)
+}
 
 // Get word predictions using AI or simple algorithm
 async function getPredictions(transcript: string): Promise<string[]> {
@@ -123,20 +163,32 @@ function getSimplePredictions(transcript: string): string[] {
 }
 
 // Handle messages from popup and content scripts
-chrome.runtime.onMessage.addListener((message: PlasmoBackgroundMessage, sender, sendResponse) => {
-  if (message.type === "TOGGLE_ACTIVE") {
-    isActive = message.isActive
-    chrome.storage.sync.set({ isActive })
-    sendResponse({ success: true })
-  } else if (message.type === "GET_STATE") {
-    sendResponse({ isActive, apiKey })
-  } else if (message.type === "GET_PREDICTIONS") {
-    // Content script requests predictions from background
-    getPredictions(message.transcript!).then((predictions) => {
-      sendResponse({ predictions })
-    })
-    return true // Keep message channel open for async response
-  }
-})
+function setupMessageListener() {
+  chrome.runtime.onMessage.addListener((message: PlasmoBackgroundMessage, sender, sendResponse) => {
+    if (message.type === "TOGGLE_ACTIVE") {
+      isActive = message.isActive
+      chrome.storage.sync.set({ isActive })
+      sendResponse({ success: true })
+    } else if (message.type === "GET_STATE") {
+      sendResponse({ isActive, apiKey })
+    } else if (message.type === "GET_PREDICTIONS") {
+      // Content script requests predictions from background
+      getPredictions(message.transcript!).then((predictions) => {
+        sendResponse({ predictions })
+      })
+      return true // Keep message channel open for async response
+    }
+  })
+}
 
 export {}
+
+// Re-run init when the extension is installed/updated so state is fresh
+try {
+  chrome.runtime.onInstalled.addListener(() => {
+    console.log("[background] onInstalled fired, re-initializing")
+    initialize()
+  })
+} catch (e) {
+  console.error("[background] failed to register onInstalled listener:", e)
+}
